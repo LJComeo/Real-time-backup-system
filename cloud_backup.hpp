@@ -1,10 +1,13 @@
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <fstream>
 #include <unordered_map>
 #include <zlib.h>
+#include <time.h>
+#include </usr/include/mysql/mysql.h>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
 #include <pthread.h>
@@ -75,7 +78,7 @@ namespace _cloud_srv
                     std::cout << "open file " << dst << " failed\n";
                     return false;
                 }
-                int wlen = 0;
+                size_t wlen = 0;
                 while(wlen < body.size())
                 {
                     int ret = gzwrite(gf , &body[wlen] , body.size() - wlen);
@@ -119,21 +122,29 @@ namespace _cloud_srv
     class DataManager
     {
         public:
-            DataManager(const std::string &path)
-                :_back_file(path)
+            DataManager()
             {
                 pthread_rwlock_init(&_rwlock,NULL);//初始化读写锁
+                mysql_init(&mysql);//初始化数据库
+                if(!mysql_real_connect(&mysql,"localhost","test","1","testsql",9000,NULL,0))//连接数据库
+                {
+                    printf("failed to connect\n");
+                }
             }
             ~DataManager()
             {
                 pthread_rwlock_destroy(&_rwlock);
+                mysql_close(&mysql);//关闭数据库
             }
             //判断文件是否存在
             bool Exists(const std::string &name)
             {
                 pthread_rwlock_rdlock(&_rwlock);
-                auto it = _file_list.find(name);
-                if(it == _file_list.end())
+                std::string str = "'" + name + "'";
+                std::string query = "select fname from CBU where fname=";
+                query += str;
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
                 {
                     pthread_rwlock_unlock(&_rwlock);
                     return false;
@@ -145,29 +156,38 @@ namespace _cloud_srv
             bool IsCompress(const std::string &name)
             {
                 pthread_rwlock_rdlock(&_rwlock);
-                auto it = _file_list.find(name);
-                if(it == _file_list.end())
+                std::string str = "'" + name +"'";
+                std::string query = "select zname from CBU where zname=";
+                query += str;
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
                 {
                     pthread_rwlock_unlock(&_rwlock);
-                    return false;
-                }
-                if(it->first == it->second)
-                {
-                    pthread_rwlock_unlock(&_rwlock);
-                    return false;
+                    return true;
                 }
                 pthread_rwlock_unlock(&_rwlock);
-                return true;
+                return false;
             }
             //获取未压缩文件列表
             bool NonCompressList(std::vector<std::string> *list)
             {
                 pthread_rwlock_rdlock(&_rwlock);
-                for(auto it = _file_list.begin();it != _file_list.end();it++)
+                std::string query = "select fname from CBU where fname=zname";
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
                 {
-                    if(it->first == it->second)
+                    pthread_rwlock_unlock(&_rwlock);
+                    return false;
+                }
+                MYSQL_RES *res;
+                MYSQL_ROW row;
+                size_t t;
+                res = mysql_store_result(&mysql);
+                while(row = mysql_fetch_row(res))
+                {
+                    for(t = 0;t < mysql_num_fields(res);t++)
                     {
-                        list->push_back(it->first);
+                        list->push_back(row[t]);
                     }
                 }
                 pthread_rwlock_unlock(&_rwlock);
@@ -177,83 +197,130 @@ namespace _cloud_srv
             bool Insert(const std::string &src,const std::string& dst)
             {
                 pthread_rwlock_wrlock(&_rwlock);
-                _file_list[src] = dst;
+                std::string strf = "'";
+                strf += src;
+                strf += "'";
+                std::string strz = "'";
+                strz += dst;
+                strz += "'";
+                std::string query = "insert into CBU values";
+                std::string tmp = "(";
+                tmp += strf;
+                tmp += ",";
+                tmp += strz;
+                tmp += ")";
+                query += tmp;
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
+                {
+                    printf("insert error\n");
+                    pthread_rwlock_unlock(&_rwlock);
+                    return false;
+                }
+                printf("insert success\n");
                 pthread_rwlock_unlock(&_rwlock);
-                Storage();
+                //Storage();
+                return true;
+            }
+            //更新数据库
+            bool Update(const std::string &src,const std::string& dst)
+            {
+                pthread_rwlock_wrlock(&_rwlock);
+                std::string strf = "'";
+                strf += src;
+                strf += "'";
+                std::string strz = "'";
+                strz += dst;
+                strz += "'";
+                std::string query = "update CBU set zname=";
+                query += strz;
+                query += " where fname=";
+                query += strf;
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
+                {
+                    printf("update error\n");
+                    pthread_rwlock_unlock(&_rwlock);
+                    return false;
+                }
+                printf("update success\n");
+                pthread_rwlock_unlock(&_rwlock);
                 return true;
             }
             //获取所有文件名称
             bool GetAllName(std::vector<std::string> *list)
             {
                 pthread_rwlock_rdlock(&_rwlock);
-                auto it = _file_list.begin();
-                for(;it != _file_list.end();it++)
+                std::string query = "select fname from CBU";
+                int ret = mysql_real_query(&mysql,query.c_str(),(unsigned long)query.size());
+                if(ret)
                 {
-                    list->push_back(it->first);
+                    pthread_rwlock_unlock(&_rwlock);
+                    return false;
+                }
+                MYSQL_RES *res;
+                MYSQL_ROW row;
+                size_t t;
+                res = mysql_store_result(&mysql);
+                while(row = mysql_fetch_row(res))
+                {
+                    for(t = 0;t < mysql_num_fields(res);t++)
+                    {
+                        list->push_back(row[t]);
+                    }
                 }
                 pthread_rwlock_unlock(&_rwlock);
                 return true;
             }
-            //数据改变后持久化存储
-            bool Storage()
+            //获取当前的系统日期和时间
+            std::string GetTime()
             {
-                std::stringstream tmp;
-                pthread_rwlock_rdlock(&_rwlock);
-                auto it = _file_list.begin(); 
-                for(;it != _file_list.end();it++)
-                {
-                    tmp << it->first << " "<< it->second << "\r\n";
-                }
-                pthread_rwlock_unlock(&_rwlock);
-                FileTool::Write(_back_file,tmp.str());
-                return true;
+                time_t nSeconds;
+                struct tm * PTM;
+                time(&nSeconds);
+                PTM = localtime(&nSeconds);
+
+                std::string ret;
+                ret += std::to_string(PTM->tm_year+1900);
+                ret += '-';
+                ret += std::to_string(PTM->tm_mon + 1);
+                ret += '-';
+                ret += std::to_string(PTM->tm_mday);
+                ret += ' ';
+                ret += std::to_string(PTM->tm_hour);
+                ret += ':';
+                ret += std::to_string(PTM->tm_min);
+                ret += ':';
+                ret += std::to_string(PTM->tm_sec);
+
+                return ret;
             }
             //获取被压缩的文件
             bool GetgzName(const std::string &src,std::string *dst)
             {
-                auto it = _file_list.find(src);
-                if(it == _file_list.end())
+                std::string query = "select zname from CBU where fname=";
+                std::string str = "'" + src + "'";
+                query += str;
+                MYSQL_RES *res;
+                MYSQL_ROW row;
+                size_t t;
+                res = mysql_store_result(&mysql);
+                while(row = mysql_fetch_row(res))
                 {
-                    return false;
-                }
-                *dst = it->second;
-                return true;
-            }
-            //初始化加载原有数据
-            bool InitLoad()
-            {
-                //1.将这个备份文件的数据读取出来
-                std::string body;
-                if(FileTool::Read(_back_file,&body) == false)
-                {
-                    return false;
-                } 
-                //2.进行字符串处理，按照\r\n进行分割
-                std::vector<std::string> list;
-                boost::split(list,body,boost::is_any_of("\r\n"),
-                        boost::token_compress_off);
-                //3.每一行按照空格进行分割-前边是key，后边是val
-                for(auto i : list)
-                {
-                    size_t pos = i.find(" ");
-                    if(pos == std::string::npos)
+                    for(t = 0;t < mysql_num_fields(res);t++)
                     {
-                        continue;
+                        *dst = row[t];
                     }
-                    std::string key = i.substr(0,pos);
-                    std::string val = i.substr(pos+1);
-                
-                //4.将key/val添加到_file_list中
-                    Insert(key,val);
                 }
                 return true;
             }
         private:
-            std::string _back_file;//持久化数据存储文件名称
-            std::unordered_map<std::string,std::string> _file_list;
+            //std::string _back_file;//持久化数据存储文件名称
+            //std::unordered_map<std::string,std::string> _file_list;
+            MYSQL mysql;
             pthread_rwlock_t _rwlock;
     };
-    DataManager data_manage(DATA_FILEPATH);    
+    DataManager data_manage;    
     class NonHotCompress
     {
         public:
@@ -267,7 +334,7 @@ namespace _cloud_srv
                     std::vector<std::string> list;
                     data_manage.NonCompressList(&list);
                     //2.逐个判断这个文件是不是热点文件
-                    for(int i = 0;i < list.size();i++)
+                    for(size_t i = 0;i < list.size();i++)
                     {
                         bool ret = FileIsHot(list[i]);
                         if(ret == false)
@@ -280,7 +347,7 @@ namespace _cloud_srv
                             //3.如果是非热点文件，则压缩这个文件，删除源文件
                             if(CompressUtil::Compress(src_name,dst_name) == true)
                             {
-                                data_manage.Insert(s_filename,d_filename);
+                                data_manage.Update(s_filename,d_filename);
                                 unlink(src_name.c_str());//删除源文件
                             }
                         }
@@ -342,13 +409,14 @@ namespace _cloud_srv
                 std::vector<std::string> list;
                 data_manage.GetAllName(&list);
                 std::stringstream tmp;
-                tmp << "<html><body><hr />";
-                for(int i = 0;i < list.size();i++)
+                tmp << "<html>\r\n\t<head><title>Real-Time-BackUp-system</title></head>\r\n\r\n\t<body>\r\n\t\t<h1>Real-Time-BackUp</h1><hr />";
+                for(size_t i = 0;i < list.size();i++)
                 {
-                    tmp<<"<a href='/download/" <<list[i] <<  "'>" << list[i] << "</a>";
+                    tmp<<"\t\t<a href='/download/" <<list[i] <<  "'>" << list[i] << "</a>";
+                    tmp << "&nbsp&nbsp&nbsp&nbsp&nbsp&nbsp" << data_manage.GetTime();
                     tmp << "<hr />";
                 }
-                tmp << "<hr /></body></html>";
+                tmp << "</body></html>";
 
                 rsp.set_content(tmp.str().c_str(),tmp.str().size(),"text/html");
                 rsp.status = 200;
@@ -372,7 +440,7 @@ namespace _cloud_srv
                     std::string gzpathname = GZFILE_DIR + gzfile;
                     CompressUtil::UnCompress(gzpathname,pathname);
                     unlink(gzpathname.c_str());//删除压缩包
-                    data_manage.Insert(filename,filename);//更新数据信息
+                    data_manage.Update(filename,filename);//更新数据信息
                 }
                 FileTool::Read(pathname,&rsp.body);
                 rsp.set_header("Content-Type","application/octet-stream");
